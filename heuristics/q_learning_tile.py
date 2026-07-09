@@ -1,24 +1,38 @@
+"""
+Q-Learning com Tile Coding
+==========================
+Semi-gradiente TD(0) com representação por tile coding nas dimensões contínuas
+do estado (posição y do jogador e velocidade do jogo). As 25 células binárias do
+grid sensor permanecem como features diretas. Vetor φ(s): 588 dimensões.
+
+Resultado: negativo — tile coding enriqueceu dimensões que não eram o gargalo.
+Ver DEC-008 e EXP-003 em FOR_PAPER.md para a análise completa.
+
+Referência: Sutton & Barto (2018), cap. 9-10.
+"""
+
+import time
+
 import numpy as np
 from collections import deque
 
 
-# ─── Hyperparameters ─────────────────────────────────────────────────────────
+# ─── Hiperparâmetros ──────────────────────────────────────────────────────────
 
-N_TILINGS    = 8        # number of overlapping grids
-N_BINS       = 8        # bins per dimension per tiling
-ALPHA        = 0.0001   # learning rate (smaller — more parameters now)
-GAMMA        = 0.99     # discount factor
-EPS_START    = 1.0      # initial exploration rate
-EPS_END      = 0.05     # minimum exploration rate
-EPS_DECAY    = 0.997    # slower decay — more episodes needed to fill tile space
-BUFFER_SIZE  = 30_000   # larger buffer — richer feature space needs more diversity
-BATCH_SIZE   = 128      # mini-batch size per update
-LEARN_EVERY  = 4        # update every N environment steps
-N_ACTIONS    = 3        # 0=noop, 1=up, 2=down
+MAX_HOURS    = 8.5
+N_TILINGS    = 8
+N_BINS       = 8
+ALPHA        = 0.0001
+GAMMA        = 0.99
+EPS_START    = 1.0
+EPS_END      = 0.05
+EPS_DECAY    = 0.997
+BUFFER_SIZE  = 30_000
+BATCH_SIZE   = 128
+LEARN_EVERY  = 4
+N_ACTIONS    = 3
 
-# Continuous state dimensions and their ranges
-# state[25] = player_y in [0, 1]
-# state[26] = game_speed in [0, 1]
+# Dimensões contínuas do estado: player_y ∈ [0,1] e game_speed ∈ [0,1]
 CONT_DIMS    = [25, 26]
 CONT_RANGES  = [(0.0, 1.0), (0.0, 1.0)]
 
@@ -26,112 +40,114 @@ CONT_RANGES  = [(0.0, 1.0), (0.0, 1.0)]
 # ─── Tile Coder ───────────────────────────────────────────────────────────────
 
 class TileCoder:
+    """Codificação por tiles sobrepostos para dimensões contínuas do estado.
+
+    Cada tiling é deslocado levemente em relação ao anterior, garantindo que
+    estados próximos ativem diferentes combinações de tiles. Para cada tiling,
+    exatamente um tile é ativado por dimensão contínua.
+    """
+
     def __init__(self, n_tilings, n_bins, cont_dims, cont_ranges):
         self.n_tilings   = n_tilings
         self.n_bins      = n_bins
         self.cont_dims   = cont_dims
         self.cont_ranges = cont_ranges
         self.n_cont      = len(cont_dims)
+        self.n_tiles     = n_tilings * (n_bins ** self.n_cont)
 
-        # Total number of tile features
-        # Each tiling has n_bins^n_cont tiles; exactly one fires per tiling
-        self.n_tiles = n_tilings * (n_bins ** self.n_cont)
-
-        # Precompute offsets: each tiling is shifted by offset_i in each dim
-        # Standard offset: i / (n_tilings * n_bins) of the full range
+        # Deslocamento de cada tiling em cada dimensão contínua
         self._offsets = np.array([
-            [
-                i / (n_tilings * n_bins) * (hi - lo)
-                for (lo, hi) in cont_ranges
-            ]
+            [i / (n_tilings * n_bins) * (hi - lo) for (lo, hi) in cont_ranges]
             for i in range(n_tilings)
-        ], dtype=np.float32)   # shape (n_tilings, n_cont)
+        ], dtype=np.float32)
 
     def _get_tile_indices(self, cont_values: np.ndarray) -> np.ndarray:
+        """Retorna os índices dos tiles ativos (um por tiling)."""
         indices = np.zeros(self.n_tilings, dtype=np.int32)
-
         for t in range(self.n_tilings):
             tile_idx = 0
             for d in range(self.n_cont):
-                lo, hi   = self.cont_ranges[d]
-                val      = cont_values[d]
-                # Shift value by tiling offset, then clamp to range
-                shifted  = val + self._offsets[t, d]
-                shifted  = np.clip(shifted, lo, hi - 1e-8)
-                # Map to bin index
-                bin_idx  = int((shifted - lo) / (hi - lo) * self.n_bins)
-                bin_idx  = np.clip(bin_idx, 0, self.n_bins - 1)
-                # Combine dimensions into single flat tile index (row-major)
+                lo, hi  = self.cont_ranges[d]
+                shifted = np.clip(cont_values[d] + self._offsets[t, d], lo, hi - 1e-8)
+                bin_idx = int((shifted - lo) / (hi - lo) * self.n_bins)
+                bin_idx = np.clip(bin_idx, 0, self.n_bins - 1)
                 tile_idx = tile_idx * self.n_bins + bin_idx
-
-            # Offset by tiling number so each tiling occupies its own region
             indices[t] = t * (self.n_bins ** self.n_cont) + tile_idx
-
         return indices
 
     def encode(self, state: np.ndarray) -> tuple:
+        """Codifica as dimensões contínuas em vetor de tiles binário.
+
+        Retorna (tile_features, tile_indices):
+          tile_features: vetor one-hot com os tiles ativos
+          tile_indices:  índice normalizado de bin por dimensão (para cross-terms)
+        """
         cont_values  = np.array([state[d] for d in self.cont_dims], dtype=np.float32)
         active_tiles = self._get_tile_indices(cont_values)
 
-        tile_features           = np.zeros(self.n_tiles, dtype=np.float32)
+        tile_features = np.zeros(self.n_tiles, dtype=np.float32)
         tile_features[active_tiles] = 1.0
 
-        # Normalized bin indices for cross terms (one per continuous dim)
         tile_indices = np.zeros(self.n_cont, dtype=np.float32)
         for d in range(self.n_cont):
-            lo, hi      = self.cont_ranges[d]
-            val         = np.clip(cont_values[d], lo, hi - 1e-8)
+            lo, hi = self.cont_ranges[d]
+            val    = np.clip(cont_values[d], lo, hi - 1e-8)
             tile_indices[d] = int((val - lo) / (hi - lo) * self.n_bins) / self.n_bins
 
         return tile_features, tile_indices
 
 
-# ─── Feature Vector ───────────────────────────────────────────────────────────
+# ─── Vetor de Features ────────────────────────────────────────────────────────
 
-# Build a global tile coder (shared across all calls to build_features)
 _tile_coder = TileCoder(N_TILINGS, N_BINS, CONT_DIMS, CONT_RANGES)
 
 
 def build_features(state: np.ndarray) -> np.ndarray:
-    s              = state.astype(np.float32)
-    grid           = s[:25]                          # sensor grid (binary)
+    """Constrói o vetor φ(s) de 588 dimensões.
+
+    Componentes: [grid | tiles | grid×y | grid×velocidade | bias]
+    """
+    s    = state.astype(np.float32)
+    grid = s[:25]
 
     tile_features, tile_indices = _tile_coder.encode(s)
+    y_idx   = tile_indices[0]
+    spd_idx = tile_indices[1]
 
-    y_idx          = tile_indices[0]                 # normalized y bin
-    spd_idx        = tile_indices[1]                 # normalized speed bin
-
-    cross_y        = grid * y_idx                    # grid × y position
-    cross_speed    = grid * spd_idx                  # grid × speed
-    bias           = np.array([1.0], dtype=np.float32)
-
-    return np.concatenate([grid, tile_features, cross_y, cross_speed, bias])
+    return np.concatenate([
+        grid,
+        tile_features,
+        grid * y_idx,
+        grid * spd_idx,
+        np.array([1.0], dtype=np.float32),
+    ])
 
 
 def feature_dim() -> int:
-    """Return the dimensionality of the feature vector."""
-    dummy = np.zeros(27, dtype=np.float32)
-    return len(build_features(dummy))
+    """Retorna a dimensionalidade do vetor de features."""
+    return len(build_features(np.zeros(27, dtype=np.float32)))
 
 
-# ─── Experience Replay Buffer ─────────────────────────────────────────────────
+# ─── Buffer de Replay ─────────────────────────────────────────────────────────
 
 class ReplayBuffer:
-    """Circular buffer for (s, a, r, s', done) transitions."""
+    """Buffer circular de transições (s, a, r, s', done)."""
 
     def __init__(self, capacity: int = BUFFER_SIZE):
         self.buffer = deque(maxlen=capacity)
 
     def push(self, state, action, reward, next_state, done):
+        """Armazena uma transição no buffer."""
         self.buffer.append((
             state.astype(np.float32),
             int(action),
             float(reward),
             next_state.astype(np.float32),
-            bool(done)
+            bool(done),
         ))
 
     def sample(self, batch_size: int) -> list:
+        """Retorna um mini-batch de transições amostradas aleatoriamente."""
         indices = np.random.choice(len(self.buffer), batch_size, replace=False)
         return [self.buffer[i] for i in indices]
 
@@ -139,25 +155,33 @@ class ReplayBuffer:
         return len(self.buffer)
 
 
-# ─── Reward Function ──────────────────────────────────────────────────────────
+# ─── Função de Recompensa ─────────────────────────────────────────────────────
 
 def compute_reward(prev_alive: bool, curr_alive: bool, state: np.ndarray) -> float:
+    """Calcula a recompensa instantânea.
+
+    Morte: -100. Obstáculo na coluna central: -0.5. Sobrevivência: +1.0.
+    """
     if prev_alive and not curr_alive:
         return -100.0
     if not curr_alive:
         return 0.0
-
     reward = 1.0
     center_col = [2, 7, 12, 17, 22]
     if any(state[i] > 0 for i in center_col):
         reward -= 0.5
-
     return reward
 
 
-# ─── Q-Learning Agent ─────────────────────────────────────────────────────────
+# ─── Agente Q-Learning com Tile Coding ───────────────────────────────────────
 
 class QLearningTileAgent:
+    """Agente Q-Learning com representação por tile coding.
+
+    Usa semi-gradiente TD(0) e buffer de replay, idêntico ao agente linear,
+    mas com um vetor φ(s) de 588 dimensões baseado em tile coding.
+    Interface: predict(state: np.ndarray) -> int.
+    """
 
     def __init__(
         self,
@@ -184,42 +208,39 @@ class QLearningTileAgent:
         self.batch_size  = batch_size
         self.replay      = ReplayBuffer(buffer_size)
         self.total_steps = 0
+        # Inicialização otimista: pequeno valor positivo incentiva exploração inicial
+        self.weights     = np.full((n_actions, n_features), 0.01, dtype=np.float32)
 
-        # Weight matrix: (n_actions, n_features)
-        # Optimistic initialisation: small positive values encourage the agent
-        # to try all actions early on rather than defaulting to argmax of zeros
-        self.weights = np.full(
-            (n_actions, n_features), 0.01, dtype=np.float32
-        )
-
-    # ── Q-value helpers ───────────────────────────────────────────────────────
+    # ── Cálculo de valor ──────────────────────────────────────────────────────
 
     def q_values(self, phi: np.ndarray) -> np.ndarray:
-        """Q(s,·) for all actions. phi shape: (n_features,)"""
+        """Retorna Q(s,·) para todas as ações. phi: (n_features,)"""
         return self.weights @ phi
 
     def q_value(self, phi: np.ndarray, action: int) -> float:
+        """Retorna Q(s, a) para uma ação específica."""
         return float(self.weights[action] @ phi)
 
-    # ── Agent interface ───────────────────────────────────────────────────────
+    # ── Interface do agente ───────────────────────────────────────────────────
 
     def predict(self, state: np.ndarray) -> int:
-        """
-        Epsilon-greedy action selection.
-        Set epsilon=0 before testing for pure exploitation.
-        """
+        """Seleciona ação via política ε-greedy. Defina epsilon=0 na avaliação."""
         phi = build_features(state)
         if np.random.rand() < self.epsilon:
             return np.random.randint(self.n_actions)
         return int(np.argmax(self.q_values(phi)))
 
-    # ── Learning ──────────────────────────────────────────────────────────────
+    # ── Aprendizado ───────────────────────────────────────────────────────────
 
     def store(self, state, action, reward, next_state, done):
+        """Adiciona uma transição ao buffer de replay."""
         self.replay.push(state, action, reward, next_state, done)
 
     def learn(self) -> float:
-        
+        """Atualização de semi-gradiente TD(0) em um mini-batch do buffer.
+
+        Retorna o erro TD médio absoluto, ou 0.0 se o buffer estiver insuficiente.
+        """
         if len(self.replay) < self.batch_size:
             return 0.0
 
@@ -229,11 +250,9 @@ class QLearningTileAgent:
         for state, action, reward, next_state, done in batch:
             phi      = build_features(state)
             phi_next = build_features(next_state)
-
-            q_sa  = self.q_value(phi, action)
-            target = reward if done else reward + self.gamma * np.max(self.q_values(phi_next))
-
-            delta = target - q_sa
+            q_sa     = self.q_value(phi, action)
+            target   = reward if done else reward + self.gamma * np.max(self.q_values(phi_next))
+            delta    = target - q_sa
             self.weights[action] += self.alpha * delta * phi
             errors.append(abs(delta))
 
@@ -241,47 +260,59 @@ class QLearningTileAgent:
         return float(np.mean(errors))
 
     def decay_epsilon(self):
-        """Anneal exploration — call once per episode."""
+        """Reduz ε multiplicativamente. Chamar uma vez por episódio."""
         self.epsilon = max(self.eps_end, self.epsilon * self.eps_decay)
 
-    # ── Persistence ───────────────────────────────────────────────────────────
+    # ── Persistência ──────────────────────────────────────────────────────────
 
     def save(self, path: str = "q_weights_tile.npy"):
+        """Salva a matriz de pesos em disco."""
         np.save(path, self.weights)
-        print(f"[QLearning-Tile] Weights saved → '{path}'")
+        print(f"[QLearning-Tile] Pesos salvos → '{path}'")
 
     def load(self, path: str = "q_weights_tile.npy"):
+        """Carrega a matriz de pesos do disco."""
         self.weights = np.load(path).astype(np.float32)
-        print(f"[QLearning-Tile] Weights loaded ← '{path}'")
+        print(f"[QLearning-Tile] Pesos carregados ← '{path}'")
 
 
-# ─── Training Loop ────────────────────────────────────────────────────────────
+# ─── Loop de Treinamento ──────────────────────────────────────────────────────
 
 def train_q_learning_tile(
     agent,
     GameClass,
     GameConfigClass,
-    n_episodes:  int  = 8000,
-    learn_every: int  = LEARN_EVERY,
-    render:      bool = False,
-    save_path:   str  = "q_weights_tile.npy",
-    print_every: int  = 100,
+    n_episodes:  int   = 999_999,
+    max_hours:   float = MAX_HOURS,
+    learn_every: int   = LEARN_EVERY,
+    render:      bool  = False,
+    save_path:   str   = "q_weights_tile.npy",
+    print_every: int   = 100,
 ) -> list:
-  
+    """Treina o agente Q-Tile até atingir o limite de tempo ou de episódios.
 
+    Retorna o histórico de pontuações por episódio.
+    """
     config        = GameConfigClass(num_players=1, fps=0 if not render else 60)
     score_history = []
     best_score    = -np.inf
     step_count    = 0
+    start_time    = time.time()
+    max_seconds   = max_hours * 3600
 
     for ep in range(1, n_episodes + 1):
+        elapsed = time.time() - start_time
+        if elapsed >= max_seconds:
+            print(f"\n[Q-Tile] Limite de tempo atingido ({elapsed/3600:.2f}h) — encerrando.")
+            break
+
         game       = GameClass(config=config, render=render)
         state      = game.get_state(0, include_internals=True)
         prev_alive = True
         ep_errors  = []
 
         while not game.all_players_dead():
-            action = agent.predict(state)
+            action     = agent.predict(state)
             game.update([action])
             if render:
                 game.render_frame()
@@ -292,7 +323,6 @@ def train_q_learning_tile(
             done       = not curr_alive
 
             agent.store(state, action, reward, next_state, done)
-
             step_count += 1
             if step_count % learn_every == 0:
                 err = agent.learn()
@@ -311,16 +341,18 @@ def train_q_learning_tile(
             agent.save(save_path)
 
         if ep % print_every == 0:
-            recent  = score_history[-print_every:]
-            avg_err = float(np.mean(ep_errors)) if ep_errors else 0.0
+            recent    = score_history[-print_every:]
+            avg_err   = float(np.mean(ep_errors)) if ep_errors else 0.0
+            elapsed   = time.time() - start_time
+            remaining = (max_seconds - elapsed) / 3600
             print(
-                f"Ep {ep:>5}/{n_episodes} | "
+                f"Ep {ep:>6} | "
                 f"Score: {episode_score:>7.2f} | "
                 f"Avg({print_every}): {np.mean(recent):>7.2f} | "
-                f"Best: {best_score:>7.2f} | "
+                f"Melhor: {best_score:>7.2f} | "
                 f"ε: {agent.epsilon:.4f} | "
-                f"TD err: {avg_err:.4f} | "
-                f"Buffer: {len(agent.replay)}"
+                f"Erro TD: {avg_err:.4f} | "
+                f"Restante: {remaining:.2f}h"
             )
 
     return score_history

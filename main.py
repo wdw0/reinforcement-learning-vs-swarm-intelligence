@@ -6,12 +6,15 @@ Usage:
     python main.py --model tile         # Q-Learning, tile coding       (Phase 3)
     python main.py --model dqn          # Deep Q-Network                (Phase 4)
     python main.py --model abc          # Artificial Bee Colony + NN    (Phase 5)
-    python main.py --model abc --basic  # Basic ABC (no iABC improvement)
+    python main.py --model bat          # Bat Algorithm + NN
+    python main.py --model gwo          # Grey Wolf Optimizer + NN
+    python main.py --model firefly      # Firefly Algorithm + NN
+    python main.py --model fss          # Fish School Search + NN
 
-    python main.py --model dqn --episodes 2000    # override episode/iteration count
-    python main.py --model abc --iterations 500   # override ABC iteration count
+    python main.py --model dqn --episodes 2000    # override episode count
+    python main.py --model abc --iterations 500   # override iteration count
     python main.py --model abc --render            # with Pygame window
-    python main.py --model dqn --test-only         # evaluate saved weights only
+    python main.py --model abc --test-only         # evaluate saved weights only
     python main.py --help                          # show all options
 
 INSTALL REQUIREMENTS
@@ -62,7 +65,7 @@ def run_test_episodes_rl(agent, n: int = 30) -> np.ndarray:
 
 def run_test_episodes_nn(weights: np.ndarray, layer_sizes: list,
                          n: int = 30) -> np.ndarray:
-    """Test a neural network agent (from ABC weights) over n episodes."""
+    """Test a neural network agent (metaheuristic) over n episodes."""
     from classifier.neural_network import NeuralNetwork
     from game.agents import NeuralNetworkAgent
 
@@ -83,7 +86,7 @@ def run_test_episodes_nn(weights: np.ndarray, layer_sizes: list,
     return np.round(scores, 2)
 
 
-# ─── Model configs (RL models) ────────────────────────────────────────────────
+# ─── RL model configs ─────────────────────────────────────────────────────────
 
 RL_CONFIGS = {
     "linear": {
@@ -95,7 +98,7 @@ RL_CONFIGS = {
         "results_path" : "training_results_linear.txt",
         "plot_path"    : "q_learning_linear_training.png",
         "plot_color"   : "steelblue",
-        "n_episodes"   : 5000,
+        "n_episodes"   : 999_999,
     },
     "tile": {
         "label"        : "Q-Learning — Tile Coding (Phase 3)",
@@ -106,7 +109,7 @@ RL_CONFIGS = {
         "results_path" : "training_results_tile.txt",
         "plot_path"    : "q_learning_tile_training.png",
         "plot_color"   : "darkorange",
-        "n_episodes"   : 8000,
+        "n_episodes"   : 999_999,
     },
     "dqn": {
         "label"        : "Deep Q-Network (Phase 4)",
@@ -117,47 +120,95 @@ RL_CONFIGS = {
         "results_path" : "training_results_dqn.txt",
         "plot_path"    : "dqn_training.png",
         "plot_color"   : "mediumseagreen",
-        "n_episodes"   : 5000,
+        "n_episodes"   : 999_999,
+    },
+}
+
+# ─── Metaheuristic configs ────────────────────────────────────────────────────
+
+META_CONFIGS = {
+    "abc": {
+        "label"        : "Artificial Bee Colony (iABC) + Neural Network",
+        "module"       : "heuristics.abc",
+        "class"        : "ArtificialBeeColony",
+        "save_path"    : "abc_weights.npy",
+        "results_path" : "training_results_abc.txt",
+        "plot_path"    : "abc_training.png",
+        "plot_color"   : "mediumpurple",
+        "optimise_fn"  : "optimise",
+    },
+    "bat": {
+        "label"        : "Bat Algorithm + Neural Network",
+        "module"       : "heuristics.bat",
+        "class"        : "BatAlgorithm",
+        "save_path"    : "bat_weights.npy",
+        "results_path" : "training_results_bat.txt",
+        "plot_path"    : "bat_training.png",
+        "plot_color"   : "slategray",
+        "optimise_fn"  : "optimise",
+    },
+    "gwo": {
+        "label"        : "Grey Wolf Optimizer + Neural Network",
+        "module"       : "heuristics.gwo",
+        "class"        : "GreyWolfOptimizer",
+        "save_path"    : "gwo_weights.npy",
+        "results_path" : "training_results_gwo.txt",
+        "plot_path"    : "gwo_training.png",
+        "plot_color"   : "dimgray",
+        "optimise_fn"  : "optimise",
+    },
+    "firefly": {
+        "label"        : "Firefly Algorithm + Neural Network",
+        "module"       : "heuristics.firefly",
+        "class"        : "FireflyAlgorithm",
+        "save_path"    : "firefly_weights.npy",
+        "results_path" : "training_results_firefly.txt",
+        "plot_path"    : "firefly_training.png",
+        "plot_color"   : "gold",
+        "optimise_fn"  : "optimise",
+    },
+    "fss": {
+        "label"        : "Fish School Search + Neural Network",
+        "module"       : "heuristics.fss",
+        "class"        : "FishSchoolSearch",
+        "save_path"    : "fss_weights.npy",
+        "results_path" : "training_results_fss.txt",
+        "plot_path"    : "fss_training.png",
+        "plot_color"   : "deepskyblue",
+        "optimise_fn"  : "optimise",
     },
 }
 
 
-# ─── ABC training runner ──────────────────────────────────────────────────────
+# ─── Generic metaheuristic runner ────────────────────────────────────────────
 
-def run_abc(args):
-    """Handle ABC / iABC training and testing."""
-    from heuristics.abc import ArtificialBeeColony, LAYER_SIZES, N_BEES, N_ITER, LIMIT, N_RUNS
+def run_meta(args, model_key: str):
+    """Unified runner for all metaheuristic algorithms (ABC, BAT, GWO, FA, FSS)."""
+    import importlib
 
-    use_iabc  = not args.basic
-    algo_name = "iABC" if use_iabc else "ABC"
-    label     = f"Artificial Bee Colony ({'iABC' if use_iabc else 'basic ABC'}) + Neural Network (Phase 5)"
-    save_path    = "abc_weights.npy"
-    results_path = f"training_results_{'iabc' if use_iabc else 'abc'}.txt"
-    plot_path    = f"{'iabc' if use_iabc else 'abc'}_training.png"
-    n_iter       = args.iterations if args.iterations else N_ITER
+    cfg = META_CONFIGS[model_key]
+    mod = importlib.import_module(cfg["module"])
+    AlgoClass = getattr(mod, cfg["class"])
+
+    LAYER_SIZES = mod.LAYER_SIZES
+    N_ITER      = mod.N_ITER
+    MAX_HOURS   = mod.MAX_HOURS
+
+    n_iter = args.iterations if args.iterations else N_ITER
 
     print("=" * 65)
-    print(f"  {label}")
+    print(f"  {cfg['label']}")
     print("=" * 65)
-    print(f"  Bees (population) : {N_BEES}")
-    print(f"  Iterations        : {n_iter}")
-    print(f"  Limit (abandon)   : {LIMIT}")
-    print(f"  Runs per eval     : {N_RUNS}")
     print(f"  Network           : {LAYER_SIZES}")
-    print(f"  iABC improvement  : {use_iabc}")
+    print(f"  Iterations        : {n_iter}")
+    print(f"  Max training time : {MAX_HOURS}h")
     print("=" * 65)
 
-    abc = ArtificialBeeColony(
-        layer_sizes = LAYER_SIZES,
-        n_bees      = N_BEES,
-        n_iter      = n_iter,
-        limit       = LIMIT,
-        n_runs      = N_RUNS,
-        use_iabc    = use_iabc,
-    )
+    algo = AlgoClass(layer_sizes=LAYER_SIZES, n_iter=n_iter)
 
     # ── Test-only mode ────────────────────────────────────────────────────────
     if args.test_only:
+        save_path = cfg["save_path"]
         print(f"[test-only] Loading weights from '{save_path}'...")
         weights = np.load(save_path)
         print("Running 30 test episodes...\n")
@@ -172,12 +223,13 @@ def run_abc(args):
     print(f"\nOptimising for {n_iter} iterations...\n")
     train_start = time.time()
 
-    best_weights, best_score, history = abc.optimise(
+    optimise_fn = getattr(algo, cfg["optimise_fn"])
+    best_weights, best_score, history = optimise_fn(
         GameClass       = SurvivalGame,
         GameConfigClass = GameConfig,
         render          = args.render,
-        save_path       = save_path,
-        print_every     = 10,
+        save_path       = cfg["save_path"],
+        print_every     = 25,
     )
 
     training_duration = time.time() - train_start
@@ -187,11 +239,10 @@ def run_abc(args):
         f"\n{'='*65}\n"
         f"  TRAINING COMPLETE\n"
         f"{'='*65}\n"
-        f"  Algorithm            : {algo_name}\n"
+        f"  Algorithm            : {cfg['label']}\n"
         f"  Iterations           : {n_iter}\n"
         f"  Time elapsed         : {format_duration(training_duration)}\n"
-        f"  Best score           : {best_score:.2f}\n"
-        f"  Final avg (pop)      : {np.mean([s for s in history[-10:]]):.2f}\n"
+        f"  Best fitness         : {best_score:.4f}\n"
         f"{'='*65}\n"
     )
     print(train_summary)
@@ -199,16 +250,16 @@ def run_abc(args):
     # ── Plot ──────────────────────────────────────────────────────────────────
     plt.figure(figsize=(12, 5))
     plt.plot(range(len(scores_arr)), scores_arr,
-             color='mediumpurple', linewidth=2, label='Best score per iteration')
+             color=cfg["plot_color"], linewidth=2, label='Best score per iteration')
     plt.xlabel('Iteration')
-    plt.ylabel('Best Score')
-    plt.title(label)
+    plt.ylabel('Best Fitness')
+    plt.title(cfg["label"])
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig(plot_path, dpi=120)
+    plt.savefig(cfg["plot_path"], dpi=120)
     plt.show()
-    print(f"Training curve saved → '{plot_path}'")
+    print(f"Training curve saved → '{cfg['plot_path']}'")
 
     # ── Test ──────────────────────────────────────────────────────────────────
     print("\nRunning 30 test episodes with best weights...\n")
@@ -230,42 +281,46 @@ def run_abc(args):
     print(test_summary)
 
     # ── Save results ──────────────────────────────────────────────────────────
-    with open(results_path, "w") as f:
-        f.write(f"{label.upper()}\n")
+    with open(cfg["results_path"], "w") as f:
+        f.write(f"{cfg['label'].upper()}\n")
         f.write(f"Date: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
         f.write("HYPERPARAMETERS\n")
-        f.write(f"  Algorithm    : {algo_name}\n")
-        f.write(f"  Network      : {LAYER_SIZES}\n")
-        f.write(f"  Population   : {N_BEES}\n")
-        f.write(f"  Iterations   : {n_iter}\n")
-        f.write(f"  Limit        : {LIMIT}\n")
-        f.write(f"  Runs/eval    : {N_RUNS}\n")
-        f.write(f"  iABC         : {use_iabc}\n\n")
+        f.write(f"  Algorithm  : {model_key.upper()}\n")
+        f.write(f"  Network    : {LAYER_SIZES}\n")
+        f.write(f"  Iterations : {n_iter}\n\n")
         f.write(train_summary)
         f.write(test_summary)
-        f.write("\nBEST SCORE PER ITERATION\n")
+        f.write("\nBEST FITNESS PER ITERATION\n")
         f.write(", ".join(f"{s:.2f}" for s in history) + "\n")
 
-    print(f"Results saved → '{results_path}'")
+    print(f"Results saved → '{cfg['results_path']}'")
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
+    meta_models = list(META_CONFIGS.keys())
+    rl_models   = list(RL_CONFIGS.keys())
+    all_models  = rl_models + meta_models
+
     parser = argparse.ArgumentParser(
         description="Train an agent on the Survival Game.",
         formatter_class=argparse.RawTextHelpFormatter,
     )
     parser.add_argument(
         "--model",
-        choices=["linear", "tile", "dqn", "abc"],
+        choices=all_models,
         required=True,
         help=(
             "Which model to train:\n"
-            "  linear → Linear Q-learning, engineered features  (Phase 2)\n"
-            "  tile   → Linear Q-learning, tile coding           (Phase 3)\n"
-            "  dqn    → Deep Q-Network (requires PyTorch)         (Phase 4)\n"
-            "  abc    → Artificial Bee Colony + Neural Network    (Phase 5)"
+            "  linear   → Linear Q-learning, engineered features (Phase 2)\n"
+            "  tile     → Linear Q-learning, tile coding          (Phase 3)\n"
+            "  dqn      → Deep Q-Network (requires PyTorch)        (Phase 4)\n"
+            "  abc      → Artificial Bee Colony + Neural Network\n"
+            "  bat      → Bat Algorithm + Neural Network\n"
+            "  gwo      → Grey Wolf Optimizer + Neural Network\n"
+            "  firefly  → Firefly Algorithm + Neural Network\n"
+            "  fss      → Fish School Search + Neural Network"
         ),
     )
     parser.add_argument(
@@ -274,7 +329,7 @@ def main():
     )
     parser.add_argument(
         "--iterations", type=int, default=None,
-        help="Override default iteration count (ABC model).",
+        help="Override default iteration count (metaheuristic models).",
     )
     parser.add_argument(
         "--render", action="store_true",
@@ -284,15 +339,12 @@ def main():
         "--test-only", action="store_true",
         help="Skip training — load saved weights and run 30 test episodes.",
     )
-    parser.add_argument(
-        "--basic", action="store_true",
-        help="[ABC only] Use basic ABC instead of iABC improvement.",
-    )
+
     args = parser.parse_args()
 
-    # ── ABC: separate runner (different training paradigm) ────────────────────
-    if args.model == "abc":
-        run_abc(args)
+    # ── Metaheuristic models ──────────────────────────────────────────────────
+    if args.model in meta_models:
+        run_meta(args, args.model)
         return
 
     # ── RL models (linear, tile, dqn) ─────────────────────────────────────────
@@ -321,8 +373,7 @@ def main():
               f"= {agent.n_actions * agent.n_features:,} parameters\n")
     elif hasattr(agent, 'online_net'):
         n_params = sum(p.numel() for p in agent.online_net.parameters())
-        print(f"\n  Network      : {cfg.get('label','')}")
-        print(f"  Parameters   : {n_params:,}\n")
+        print(f"\n  Parameters   : {n_params:,}\n")
 
     # ── Test-only ─────────────────────────────────────────────────────────────
     if args.test_only:
