@@ -15,7 +15,7 @@ Eight models are implemented and compared:
 - **Firefly** — Firefly Algorithm optimizing a neural network's weights
 - **FSS** — Fish School Search optimizing a neural network's weights
 
-The RL agents (linear, tile, DQN) learn through interaction with the environment via reward signals. The metaheuristic agents (ABC, BAT, GWO, Firefly, FSS) all share the same feedforward neural network architecture (`classifier/neural_network.py`) and instead search directly over the network's weights, using the agent's in-game score as the fitness function.
+The linear Q-Learning and tile coding agents approximate the action-value function using handcrafted feature representations. In contrast, both the DQN and the metaheuristic-based agents rely on neural networks. The DQN learns its network parameters through gradient-based optimization using temporal-difference learning, whereas the metaheuristic agents (ABC, BAT, GWO, Firefly and FSS) optimize the parameters of the same feedforward neural network architecture (classifier/neural_network.py) through population-based search, using the agent's in-game score as the fitness function.
 
 ## Repository structure
 
